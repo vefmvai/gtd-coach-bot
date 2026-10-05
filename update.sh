@@ -46,6 +46,12 @@ BOT="${BOT_DIR:-$(pwd)}"
 PLUGIN="${PLUGIN_DIR:-/opt/apps/gtd-coach-plugin}"
 TODOIST="${TODOIST_DIR:-/opt/apps/todoist-mcp}"
 GCAL="${GCAL_DIR:-/opt/apps/gcal-mcp}"
+# Имя контейнера — из `.env` этой копии, как и у docker-compose.yml: вторая
+# копия коуча на том же сервере живёт под своим именем. Нет строки — имя
+# первой установки.
+if [ -z "${CONTAINER_NAME:-}" ] && [ -f "$BOT/.env" ]; then
+    CONTAINER_NAME=$(grep -m1 '^CONTAINER_NAME=' "$BOT/.env" | cut -d= -f2- || true)
+fi
 CONTAINER="${CONTAINER_NAME:-gtd-coach-bot}"
 
 # Улики и отметки — рядом с папкой бота, а не внутри неё: `data/` принадлежит

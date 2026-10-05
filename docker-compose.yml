@@ -6,7 +6,10 @@ services:
         # Какой коммит вшиваем в образ. Ставит его ./update.sh; собрали руками —
         # приедет пусто, и `/version` честно скажет «сборка неизвестна».
         GIT_SHA: ${GIT_SHA:-}
-    container_name: gtd-coach-bot
+    # Имя — из `.env` этой копии. Коучей на одном сервере бывает несколько
+    # (второй человек в семье — вторая папка, свой бот, своя память), и у каждого
+    # своё имя. Тем же `.env` имя читают update.sh и bump-engine.sh.
+    container_name: ${CONTAINER_NAME:-gtd-coach-bot}
     restart: unless-stopped
     mem_limit: 1g              # питон-поллер лёгкий, но процесс claude внутри тяжёлый
     user: "1000:1000"
@@ -59,7 +62,8 @@ services:
       # Плагина здесь нет: его клон уже смонтирован выше целиком, `.git` внутри.
       # Не склонированного соседа (ученик без календаря) docker подставит пустой
       # папкой — `/version` скажет «не установлен», и это правда.
-      - /opt/apps/gtd-coach-bot/.git:/repos/gtd-coach-bot.git:ro
+      # Свой клон, а не путь первой установки: у второй копии `.git` лежит рядом с ней.
+      - ./.git:/repos/gtd-coach-bot.git:ro
       - /opt/apps/todoist-mcp/.git:/repos/todoist-mcp.git:ro
       - /opt/apps/gcal-mcp/.git:/repos/gcal-mcp.git:ro
       - archive:/archive                           # сырьё разговоров + выжимки (в бэкапе по имени тома)

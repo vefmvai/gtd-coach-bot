@@ -52,7 +52,18 @@ def test_имя_контейнера_у_команды_и_у_compose_одно(т
 
     обновление будет молча ждать несуществующий контейнер две с половиной минуты."""
     имя = умолчание(тексты["update.sh"], "CONTAINER_NAME")
-    assert f"container_name: {имя}" in тексты["docker-compose.yml"]
+    assert f"container_name: ${{CONTAINER_NAME:-{имя}}}" in тексты["docker-compose.yml"]
+    assert умолчание(тексты["bump-engine.sh"], "CONTAINER_NAME") == имя
+
+
+@pytest.mark.parametrize("скрипт", ["update.sh", "bump-engine.sh"])
+def test_имя_второй_копии_скрипты_берут_из_env(тексты, скрипт):
+    """Compose берёт CONTAINER_NAME из `.env` сам, а скрипты — только если
+
+    прочтут его явно. Не прочтут — вторая копия коуча (свой `.env`, своё имя)
+    будет ждать `healthy` и снимать логи у ПЕРВОЙ, а ночной подъём движка
+    перезапустит не того коуча."""
+    assert "grep -m1 '^CONTAINER_NAME=' \"$BOT/.env\"" in тексты[скрипт]
 
 
 def test_версия_сборки_доезжает_до_образа(тексты):

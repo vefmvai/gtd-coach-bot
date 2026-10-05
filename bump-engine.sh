@@ -27,6 +27,10 @@ set -euo pipefail
 
 # ── 1. Где что лежит ─────────────────────────────────────────────────────────
 BOT="${BOT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+# Имя контейнера — из `.env` этой копии, тем же правилом, что в update.sh.
+if [ -z "${CONTAINER_NAME:-}" ] && [ -f "$BOT/.env" ]; then
+    CONTAINER_NAME=$(grep -m1 '^CONTAINER_NAME=' "$BOT/.env" | cut -d= -f2- || true)
+fi
 CONTAINER="${CONTAINER_NAME:-gtd-coach-bot}"
 ARCHIVE_DIR="${BOT}-deploy-logs"
 
