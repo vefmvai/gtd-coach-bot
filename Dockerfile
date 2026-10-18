@@ -30,8 +30,11 @@ FROM python:3.12-slim
 # него: раньше человек каждое утро закрывал задачу «подними версию», теперь
 # ночь поднимает сама и дёргает его, только если новая версия не встала.
 ARG CLAUDE_CODE_VERSION=2.1.251
+# poppler-utils — для присланных PDF. Read у движка листает PDF по страницам
+# программой pdftoppm и без неё на любом PDF длиннее десяти страниц отвечает
+# «not installed» (сверено по коду движка 2.1.296, 18.10.2026).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates curl gnupg openssh-client \
+        git ca-certificates curl gnupg openssh-client poppler-utils \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \

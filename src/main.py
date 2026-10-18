@@ -10,6 +10,7 @@ import html
 import logging
 import os
 import re
+import shutil
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from time import monotonic
@@ -47,6 +48,7 @@ from .recall import build_recall_server
 from . import rituals
 from .retry import retry_network
 from . import rhythms
+from . import files as присланное
 from .rhythms import describe, path_in, read, выключен
 from . import settings as coach_settings
 from .sessions import SessionStorage
@@ -86,6 +88,11 @@ PHOTOS_DIR = Path(os.environ.get("PHOTOS_DIR", "/tmp/coach-photos"))
 # Что Read умеет показать как изображение. Присланное иным форматом (heic и
 # прочая экзотика) не притворяемся, что видим, — честно говорим владельцу.
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+# Присланные файлы — тем же порядком, что картинки: одноразово, в /tmp.
+# Каждому сообщению своя подпапка: имя файла сохраняем, как прислали, — коуч
+# говорит «в твоём плане.docx», а не «в 48213.docx», — и два одноимённых
+# файла подряд не затирают друг друга.
+FILES_DIR = Path(os.environ.get("FILES_DIR", "/tmp/coach-files"))
 
 # Меню команд — то, что открывается кнопкой слева от поля ввода. Раньше на его
 # месте была нижняя клавиатура из шести кнопок; она занимала треть экрана
@@ -335,7 +342,7 @@ class CoachBot:
             model=env("COACH_MODEL", "claude-fable-5"),
             effort=env("COACH_EFFORT", "medium"),
             calendar=self._calendar_config(),
-            extra_dirs=[PHOTOS_DIR],
+            extra_dirs=[PHOTOS_DIR, FILES_DIR],
             dashboard={
                 "brain_dir": self.brain_dir,
                 "db_path": Path(env("ARCHIVE_DB", "/archive/coach.db")),
@@ -346,6 +353,7 @@ class CoachBot:
             inbox=self.inbox,
         )
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        FILES_DIR.mkdir(parents=True, exist_ok=True)
         self.voice = self._voice_recognizer()
         # Ритмы живут в мозге, а не в .env: их меняет пользователь фразой в телеграме.
         self.rhythms, problems = read(self.brain_dir)
@@ -908,6 +916,46 @@ class CoachBot:
             return document, Path(document.file_name or "").suffix.lower()
         return None, ""
 
+    async def _скачать(
+        self, source, chat_id: int, context: ContextTypes.DEFAULT_TYPE, что: str
+    ) -> bytes | None:
+        """Забрать вложение у Telegram. Не вышло — сказать владельцу и вернуть None.
+
+        Путь вложения, как и путь голосового, идёт через Xray-мост: мост моргает —
+        повторяем шаг (см. retry.py). Молчим, пока возня короткая.
+        """
+        warned = False
+
+        async def warn(attempt: int, error: BaseException) -> None:
+            nonlocal warned
+            if warned or attempt < 3:
+                return
+            warned = True
+            await context.bot.send_message(
+                chat_id=chat_id, text=f"Связь шалит, пробую забрать {что} ещё раз — подожди."
+            )
+
+        typing = asyncio.create_task(self._keep_typing(chat_id, context))
+        try:
+            telegram_file = await retry_network(
+                lambda: context.bot.get_file(source.file_id),
+                what=f"получение ссылки на {что}",
+                on_retry=warn,
+            )
+            return bytes(
+                await retry_network(
+                    lambda: telegram_file.download_as_bytearray(),
+                    what=f"скачивание: {что}",
+                    on_retry=warn,
+                )
+            )
+        except Exception as error:
+            log.exception("вложение не скачалось: %s", что)
+            await context.bot.send_message(chat_id=chat_id, text=f"Не забрал {что}: {error}")
+            return None
+        finally:
+            typing.cancel()
+
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Картинка: кладём во временный файл и показываем коучу через Read.
 
@@ -934,39 +982,9 @@ class CoachBot:
             )
             return
 
-        # Путь картинки, как и путь голосового, идёт через Xray-мост: мост моргает —
-        # повторяем шаг (см. retry.py). Молчим, пока возня короткая.
-        warned = False
-
-        async def warn(attempt: int, error: BaseException) -> None:
-            nonlocal warned
-            if warned or attempt < 3:
-                return
-            warned = True
-            await context.bot.send_message(
-                chat_id=chat_id, text="Связь шалит, пробую забрать картинку ещё раз — подожди."
-            )
-
-        typing = asyncio.create_task(self._keep_typing(chat_id, context))
-        try:
-            telegram_file = await retry_network(
-                lambda: context.bot.get_file(source.file_id),
-                what="получение ссылки на картинку",
-                on_retry=warn,
-            )
-            picture = bytes(
-                await retry_network(
-                    lambda: telegram_file.download_as_bytearray(),
-                    what="скачивание картинки",
-                    on_retry=warn,
-                )
-            )
-        except Exception as error:
-            log.exception("картинка не скачалась")
-            await context.bot.send_message(chat_id=chat_id, text=f"Не забрал картинку: {error}")
+        picture = await self._скачать(source, chat_id, context, "картинку")
+        if picture is None:
             return
-        finally:
-            typing.cancel()
 
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         path = PHOTOS_DIR / f"{update.update_id}{suffix}"
@@ -990,6 +1008,64 @@ class CoachBot:
         finally:
             # Одноразовое сносим сразу: картинка нужна была ровно на этот ответ.
             path.unlink(missing_ok=True)
+
+    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Файл: текст, маркдаун, PDF, Word, Excel и прочее — коуч читает его через Read.
+
+        Картинки файлом сюда не доходят: их раньше перехватывает on_photo.
+        Как разложить файл, решает files.py; здесь только Telegram — скачать,
+        передать путь и убрать за собой.
+        """
+        if not self._mine(update):
+            return
+        chat_id = update.effective_chat.id
+        message = update.message
+        document = message.document
+        имя = Path(document.file_name or "файл").name
+        if (document.file_size or 0) > присланное.ЛИМИТ_TELEGRAM:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"«{имя}» больше 20 МБ — Telegram такие ботам не отдаёт. "
+                "Пришли частями или только нужный кусок.",
+            )
+            return
+
+        данные = await self._скачать(document, chat_id, context, "файл")
+        if данные is None:
+            return
+
+        папка = FILES_DIR / str(update.update_id)
+        try:
+            разбор = await asyncio.to_thread(присланное.разобрать, папка, имя, данные)
+            if разбор.путь is None:
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"«{имя}» прочесть не смогу: {разбор.отказ}."
+                )
+                return
+
+            caption = (message.caption or "").strip()
+            prompt = (
+                f"пользователь прислал файл «{имя}» ({разбор.вид}). "
+                f"Открой его инструментом Read по пути `{разбор.путь}`"
+                + (" — это текст, вынутый из файла; оформление и картинки потерялись."
+                   if разбор.вынуто else ".")
+                + "\nДлинный файл читай частями (offset и limit, у PDF — pages), "
+                "а не обрывай на первой странице.\n"
+                "Файл временный: после твоего ответа его не станет. Нужное надолго — "
+                "записывай в память выводами, ссылка на путь потом никуда не приведёт.\n"
+                + (f"Подписал так: {caption}\n" if caption else "")
+                + "Ответь по содержимому файла и по подписи, если она есть."
+            )
+            await self._think_and_reply(
+                prompt,
+                chat_id,
+                context,
+                channel="file",
+                archived_as=f"[файл {имя}] {caption}" if caption else f"[файл {имя}]",
+            )
+        finally:
+            # Одноразовое сносим сразу, как и картинку.
+            shutil.rmtree(папка, ignore_errors=True)
 
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Сбой в обработке — в лог по-человечески, а не строкой «обработчиков нет».
@@ -1849,6 +1925,9 @@ class CoachBot:
         application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, self.on_voice))
         # Картинка приходит либо сжатым фото, либо файлом — ловим оба входа.
         application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
+        # Остальные файлы. Стоит ПОСЛЕ картинок: из обработчиков одной группы
+        # срабатывает первый подошедший, и картинка файлом должна уйти к глазам.
+        application.add_handler(MessageHandler(filters.Document.ALL, self.on_document))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         application.add_error_handler(self.on_error)
 
