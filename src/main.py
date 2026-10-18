@@ -93,6 +93,12 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 # говорит «в твоём плане.docx», а не «в 48213.docx», — и два одноимённых
 # файла подряд не затирают друг друга.
 FILES_DIR = Path(os.environ.get("FILES_DIR", "/tmp/coach-files"))
+# Сколько текст ждёт, не придёт ли следом вложение. Telegram «переслать
+# с комментарием» шлёт ДВУМЯ сообщениями: сперва комментарий, потом файл.
+# Отвечая на комментарий сразу, коуч 18.10.2026 сказал «вложение не доехало»
+# про файл, который просто стоял в очереди следующим. Две секунды — с запасом
+# на пачку из одного опроса и незаметно для человека.
+ПАУЗА_ТЕКСТА = 2.0
 
 # Меню команд — то, что открывается кнопкой слева от поля ввода. Раньше на его
 # месте была нижняя клавиатура из шести кнопок; она занимала треть экрана
@@ -385,6 +391,9 @@ class CoachBot:
         self.broken_rhythms = "; ".join(problems)
         # Один разговор — значит одна очередь. Иначе две сессии подерутся за resume.
         self.lock = asyncio.Lock()
+        # Текст, который ждёт ПАУЗА_ТЕКСТА, и задача, что ответит на него.
+        self._ждущий_текст: str = ""
+        self._ждущий_ответ: asyncio.Task | None = None
 
     @staticmethod
     def _voice_recognizer() -> VoiceRecognizer:
@@ -797,9 +806,67 @@ class CoachBot:
     # --- обработчики ---
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Текст отвечаем не сразу, а через ПАУЗА_ТЕКСТА — вдруг следом вложение.
+
+        Ждём в отдельной задаче, а не здесь: Telegram-слой разбирает сообщения
+        строго по одному, и сон в обработчике держал бы за дверью тот самый
+        файл, которого ждём. Несколько текстов подряд склеиваются в один —
+        так же Telegram режет длинную вставку на части, и отвечать надо раз.
+        """
         if not self._mine(update):
             return
-        await self._think_and_reply(update.message.text, update.effective_chat.id, context)
+        if self._ждущий_ответ is not None:
+            self._ждущий_ответ.cancel()
+        self._ждущий_текст = "\n".join(
+            часть for часть in (self._ждущий_текст, update.message.text) if часть
+        )
+        self._ждущий_ответ = asyncio.create_task(
+            self._ответить_на_текст(update.effective_chat.id, context)
+        )
+
+    async def _ответить_на_текст(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await asyncio.sleep(ПАУЗА_ТЕКСТА)
+        self._ждущий_ответ = None  # дальше не отменять: текст забран, ответ пошёл
+        текст, self._ждущий_текст = self._ждущий_текст, ""
+        try:
+            await self._think_and_reply(текст, chat_id, context)
+        except Exception:
+            # Задача фоновая: обработчик ошибок Telegram её не видит.
+            log.exception("ответ на текст сорвался")
+
+    def _забрать_текст(self) -> str:
+        """Отдать ждущий текст вложению, пришедшему следом, и отменить ответ на него.
+
+        Без await внутри — значит, атомарно: задача ответа либо ещё спит
+        и отменяется, либо уже забрала текст сама, и тогда здесь пусто.
+        """
+        if self._ждущий_ответ is not None:
+            self._ждущий_ответ.cancel()
+        self._ждущий_ответ = None
+        текст, self._ждущий_текст = self._ждущий_текст, ""
+        return текст
+
+    async def _с_текстом_до(self, update: Update, context: ContextTypes.DEFAULT_TYPE, разобрать) -> None:
+        """Вложение вместе с текстом, присланным прямо перед ним.
+
+        Текст забираем ДО скачивания: скачивание бывает дольше паузы, и текст
+        успел бы уйти отдельным ответом. Вложение не дошло до коуча (отказ,
+        сеть) — отвечаем хотя бы на текст: он не должен пропасть молча.
+        """
+        if not self._mine(update):
+            return
+        до = self._забрать_текст()
+        подпись = "\n".join(
+            часть for часть in (до, (update.message.caption or "").strip()) if часть
+        )
+        if not await разобрать(update, context, подпись) and до:
+            await self._think_and_reply(до, update.effective_chat.id, context)
+
+    async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._с_текстом_до(update, context, self._картинка)
+
+    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._с_текстом_до(update, context, self._файл)
 
     def _слова_для_распознавателя(self) -> list[str]:
         """Свои слова человека для подсказки распознавателю.
@@ -956,7 +1023,7 @@ class CoachBot:
         finally:
             typing.cancel()
 
-    async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _картинка(self, update: Update, context: ContextTypes.DEFAULT_TYPE, caption: str) -> bool:
         """Картинка: кладём во временный файл и показываем коучу через Read.
 
         Зрение у бота не своё, а движка: инструмент Read у Claude Code открывает
@@ -967,30 +1034,27 @@ class CoachBot:
         поэтому каждая разбирается своим ходом — связать их в одну мысль коуч
         может только по подписям.
         """
-        if not self._mine(update):
-            return
         chat_id = update.effective_chat.id
         message = update.message
         source, suffix = self._image_source(message)
         if source is None:
-            return
+            return False
         if suffix not in IMAGE_SUFFIXES:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Формат «{suffix or 'без расширения'}» я разглядеть не смогу. "
                 "Пришли jpg, png, gif или webp — или обычным фото, без файла.",
             )
-            return
+            return False
 
         picture = await self._скачать(source, chat_id, context, "картинку")
         if picture is None:
-            return
+            return False
 
         PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
         path = PHOTOS_DIR / f"{update.update_id}{suffix}"
         await asyncio.to_thread(path.write_bytes, picture)
 
-        caption = (message.caption or "").strip()
         prompt = (
             f"пользователь прислал картинку. Открой её инструментом Read по пути {path} — "
             "это изображение, ты его увидишь.\n"
@@ -1005,19 +1069,18 @@ class CoachBot:
                 channel="photo",
                 archived_as=f"[картинка] {caption}" if caption else "[картинка]",
             )
+            return True
         finally:
             # Одноразовое сносим сразу: картинка нужна была ровно на этот ответ.
             path.unlink(missing_ok=True)
 
-    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _файл(self, update: Update, context: ContextTypes.DEFAULT_TYPE, caption: str) -> bool:
         """Файл: текст, маркдаун, PDF, Word, Excel и прочее — коуч читает его через Read.
 
         Картинки файлом сюда не доходят: их раньше перехватывает on_photo.
         Как разложить файл, решает files.py; здесь только Telegram — скачать,
         передать путь и убрать за собой.
         """
-        if not self._mine(update):
-            return
         chat_id = update.effective_chat.id
         message = update.message
         document = message.document
@@ -1028,11 +1091,11 @@ class CoachBot:
                 text=f"«{имя}» больше 20 МБ — Telegram такие ботам не отдаёт. "
                 "Пришли частями или только нужный кусок.",
             )
-            return
+            return False
 
         данные = await self._скачать(document, chat_id, context, "файл")
         if данные is None:
-            return
+            return False
 
         папка = FILES_DIR / str(update.update_id)
         try:
@@ -1041,9 +1104,8 @@ class CoachBot:
                 await context.bot.send_message(
                     chat_id=chat_id, text=f"«{имя}» прочесть не смогу: {разбор.отказ}."
                 )
-                return
+                return False
 
-            caption = (message.caption or "").strip()
             prompt = (
                 f"пользователь прислал файл «{имя}» ({разбор.вид}). "
                 f"Открой его инструментом Read по пути `{разбор.путь}`"
@@ -1063,6 +1125,7 @@ class CoachBot:
                 channel="file",
                 archived_as=f"[файл {имя}] {caption}" if caption else f"[файл {имя}]",
             )
+            return True
         finally:
             # Одноразовое сносим сразу, как и картинку.
             shutil.rmtree(папка, ignore_errors=True)
