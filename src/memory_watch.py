@@ -86,6 +86,21 @@ class MemoryWatch:
     # отработала — …» — и вся отписка ехала на полку как промах.
     ОТКАЗ = re.compile(r"^нет\b\s*[.,:;—–-]*\s*", re.IGNORECASE)
 
+    # Отказ в хвосте. Разбор 31.10.2026, промах #328: на полку приехала строка
+    # «В остальном — нет» — модель перечислила промахи и закрыла раздел
+    # отпиской, которая начинается не с «нет», а кончается им. Узнаётся по двум
+    # признакам сразу: кончается отказом и короткая. У настоящей находки есть
+    # «что искали и где должно было лежать» — это всегда больше пяти слов,
+    # поэтому «…а в памяти такого правила нет» остаётся находкой.
+    ХВОСТ_ОТКАЗА = re.compile(r"(?:\bнет|\bне было|\bне нашлось|\bничего)\s*[.!…]*$", re.IGNORECASE)
+    СЛОВ_У_ОТПИСКИ = 5
+
+    @classmethod
+    def отписка(cls, body: str) -> bool:
+        if cls.ОТКАЗ.match(body):
+            return True
+        return bool(cls.ХВОСТ_ОТКАЗА.search(body)) and len(re.findall(r"\w+", body)) <= cls.СЛОВ_У_ОТПИСКИ
+
     @classmethod
     def _section(cls, answer: str, name: str) -> list[str]:
         """Достать раздел ответа. Разбор нарочно тупой: модель отвечает по форме."""
@@ -98,7 +113,7 @@ class MemoryWatch:
                 continue
             if inside and line.strip().startswith("-"):
                 body = line.strip()[1:].strip()
-                if body and not cls.ОТКАЗ.match(body):
+                if body and not cls.отписка(body):
                     lines.append(body)
         return lines
 
