@@ -85,3 +85,23 @@ def pytest_configure(config):
             "  git clone https://github.com/vefmvai/gcal-mcp.git\n"
             "  git clone https://github.com/vefmvai/gtd-coach.git"
         )
+
+
+# ── люди общих проектов ───────────────────────────────────────────────────────
+#
+# Каждый читатель задач теперь спрашивает «кто я и кто в общих проектах»
+# (`todoist_mcp.people`). Подставные Todoist в тестах этих путей не знают
+# и знать не должны: тест сводки проверяет сводку. Поэтому по умолчанию
+# общих проектов нет — ровно поведение до этапа 26. Тесты общего проекта
+# ставят своих людей сами (`tests/test_общий_проект.py`).
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _без_общих_проектов(monkeypatch):
+    from todoist_mcp import people
+
+    async def никого(client):
+        return people.Люди()
+
+    monkeypatch.setattr(people, "загрузить", никого)

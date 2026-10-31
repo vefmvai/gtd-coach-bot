@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 
 from todoist_mcp.client import TodoistClient, TodoistError
 
+from .detectors import мои
+
 log = logging.getLogger(__name__)
 
 # Метки веса из этапа 03: вес задачи — время, а не штука.
@@ -46,8 +48,10 @@ def _hours(tasks: list[dict]) -> float:
 
 
 async def _by_filter(client: TodoistClient, query: str, limit: int = 50) -> list[dict]:
+    # Чужие задачи общего проекта в сводку дня не идут: это дела другого
+    # человека, и считать их своими просрочками — значит дожимать чужим.
     data = await client.get("/tasks/filter", params={"query": query, "limit": limit})
-    return data.get("results", []) if isinstance(data, dict) else (data or [])
+    return await мои(client, data.get("results", []) if isinstance(data, dict) else (data or []))
 
 
 async def summary(token: str) -> str:

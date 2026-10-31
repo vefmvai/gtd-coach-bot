@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from todoist_mcp import people
 from todoist_mcp.client import TodoistClient, TodoistError
 
 from . import horizons
@@ -276,14 +277,28 @@ def видимые(задачи: list[dict], спрятанные: set[str]) -> 
     return [з for з in задачи if str(з.get("project_id") or "") not in спрятанные]
 
 
+async def мои(client: TodoistClient, задачи: list[dict]) -> list[dict]:
+    """Без чужих задач общего проекта — один отбор на всех читателей бота.
+
+    В общем проекте работают двое, у каждого свой коуч, и оба читают все
+    задачи подряд. Без этого отбора коуч дожимал бы человека чужими делами,
+    а приборы считали бы чужие просрочки своими. Чья задача — решает
+    `todoist_mcp.people` (исполнитель, а без него — кто завёл): правило одно
+    на инструмент и на бота. Todoist не ответил про людей — всё считается
+    своим, то есть как до общих проектов.
+    """
+    люди = await people.загрузить(client)
+    return [з for з in задачи if not люди.чужая(з)]
+
+
 async def по_фильтру(client: TodoistClient, запрос: str, limit: int = 100) -> list[dict]:
-    """Задачи по запросу Todoist. Не ответил — пусто и жалоба в лог."""
+    """Мои задачи по запросу Todoist. Не ответил — пусто и жалоба в лог."""
     try:
         data = await client.get("/tasks/filter", params={"query": запрос, "limit": limit})
     except TodoistError as err:
         log.warning("прибор «%s» не снялся: %s", запрос, err)
         return []
-    return data.get("results", []) if isinstance(data, dict) else (data or [])
+    return await мои(client, data.get("results", []) if isinstance(data, dict) else (data or []))
 
 
 
@@ -1030,7 +1045,7 @@ async def обойти(token: str, db_path: Path, calendar: dict | None = None,
     try:
         async with TodoistClient(token) as client:
             всё_подряд = await client.get_paginated("/tasks", params={"limit": 200}, cap=1000)
-            все = видимые(всё_подряд, await _спрятанные_проекты(client))
+            все = видимые(await мои(client, всё_подряд), await _спрятанные_проекты(client))
             сессии = await свежие_сессии(client, все)
             показания = [
                 (имя, len(await по_фильтру(client, запрос)), норма)

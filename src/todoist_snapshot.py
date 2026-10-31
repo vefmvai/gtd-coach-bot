@@ -42,6 +42,8 @@ from zoneinfo import ZoneInfo
 
 from todoist_mcp.client import TodoistClient, TodoistError
 
+from .detectors import мои
+
 log = logging.getLogger(__name__)
 
 SCHEMA = """
@@ -177,7 +179,11 @@ class TodoistSnapshot:
             sections = await client.get_paginated("/sections", params={"limit": 200})
             section_names = {s["id"]: s.get("name", "") for s in sections}
 
-            tasks = await client.get_paginated("/tasks", params={"limit": 200}, cap=1000)
+            # Снимок — история дел ЭТОГО человека. Чужие задачи общего проекта
+            # хранит коуч их хозяина; здесь они превратили бы чужую работу
+            # в свою — в план/факт, профиль и «закрыто за месяц».
+            tasks = await мои(client, await client.get_paginated(
+                "/tasks", params={"limit": 200}, cap=1000))
 
             # Комментарии спрашиваем У КАЖДОЙ задачи, по одному запросу.
             #
@@ -218,6 +224,7 @@ class TodoistSnapshot:
             except TodoistError as err:
                 log.warning("закрытые за сутки не забрались: %s", err)
                 closed = []
+            closed = await мои(client, closed)
 
         rows = []
         for task in tasks:
