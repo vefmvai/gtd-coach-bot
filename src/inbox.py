@@ -308,6 +308,19 @@ class Inbox:
         with self._connect() as db:
             return [dict(zip(поля, строка)) for строка in db.execute(запрос, параметры)]
 
+    def отклонённые(self, вид: str = "", limit: int = 100) -> list[dict]:
+        """Отклонённое с причиной, свежее сверху: чтобы не предлагать его снова."""
+        запрос = "SELECT id, вид, день, текст, итог FROM inbox WHERE статус=?"
+        параметры: list = [ОТКЛОНЕНА]
+        if вид:
+            запрос += " AND вид=?"
+            параметры.append(вид)
+        запрос += " ORDER BY день DESC, id DESC LIMIT ?"
+        параметры.append(limit)
+        поля = ("id", "вид", "день", "текст", "итог")
+        with self._connect() as db:
+            return [dict(zip(поля, строка)) for строка in db.execute(запрос, параметры)]
+
     def сколько(self) -> dict[str, int]:
         """Сколько открытого по каждому виду. Ноль не показываем — его и нет."""
         with self._connect() as db:

@@ -53,12 +53,19 @@ class Brain:
         return bool(code == 0 and ahead.strip() not in ("", "0"))
 
     async def push(self, reason: str) -> bool:
-        """Закоммитить и отправить, если что-то поменялось."""
+        """Закоммитить и отправить, если что-то поменялось или застряло.
+
+        Застрявшее — коммит прошлой ночи, который не уехал (поломка #233,
+        18.09.2026). Раньше `push` смотрел только на незакоммиченное, и в тихую
+        ночь без правок застрявший коммит не пробовали отправить вовсе, а
+        `dirty()` всё равно поднимал задачу — тревога без попытки починиться.
+        """
         _, status = await self._git("status", "--porcelain")
-        if not status:
+        if status:
+            await self._git("add", "-A")
+            await self._git("commit", "-m", f"Коуч (телеграм): {reason}")
+        elif not await self.dirty():
             return False
-        await self._git("add", "-A")
-        await self._git("commit", "-m", f"Коуч (телеграм): {reason}")
         code, text = await self._git("push")
         if code:
             log.warning("git push не прошёл: %s", text)
